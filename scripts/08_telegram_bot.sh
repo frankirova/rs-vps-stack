@@ -82,6 +82,18 @@ fi
 log_info "Actualizando archivo de configuración del sistema..."
 sed -i "s|TG_BOT_TOKEN=.*|TG_BOT_TOKEN=\"${TG_BOT_TOKEN}\"|" /etc/vps-hardening/config.env
 sed -i "s|TG_CHAT_ID=.*|TG_CHAT_ID=\"${TG_CHAT_ID}\"|" /etc/vps-hardening/config.env
+# SSH_USER — required by /tmpkey to resolve authorized_keys path
+if grep -q "^SSH_USER=" /etc/vps-hardening/config.env; then
+  sed -i "s|SSH_USER=.*|SSH_USER=\"${SSH_USER}\"|" /etc/vps-hardening/config.env
+else
+  echo "SSH_USER=\"${SSH_USER}\"" >> /etc/vps-hardening/config.env
+fi
+# TMPKEY_VALIDITY_HOURS — default validity for temporary SSH keys (hours)
+if grep -q "^TMPKEY_VALIDITY_HOURS=" /etc/vps-hardening/config.env; then
+  sed -i "s|TMPKEY_VALIDITY_HOURS=.*|TMPKEY_VALIDITY_HOURS=\"${TMPKEY_VALIDITY_HOURS:-24}\"|" /etc/vps-hardening/config.env
+else
+  echo "TMPKEY_VALIDITY_HOURS=\"${TMPKEY_VALIDITY_HOURS:-24}\"" >> /etc/vps-hardening/config.env
+fi
 log_ok "Credenciales actualizadas en /etc/vps-hardening/config.env"
 
 # -----------------------------------------------------------------------------
@@ -116,6 +128,16 @@ send_msg() {
       \"text\": $(echo "${text}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
       \"parse_mode\": \"HTML\"
     }" > /dev/null 2>&1
+}
+
+send_document() {
+  local file="$1"
+  local response
+  response=$(curl -s \
+    -F "chat_id=${TG_CHAT_ID}" \
+    -F "document=@${file}" \
+    "${API}/sendDocument")
+  echo "${response}"
 }
 
 get_updates() {
@@ -167,7 +189,13 @@ cmd_ayuda() {
 /si          — Instalar actualizaciones pendientes
 /no          — Posponer actualizaciones
 /reiniciar   — Reiniciar el servidor
-/ayuda       — Esta ayuda"
+/tmpkey [horas]  — Genera clave SSH temporal (default 24h, máx 168h)
+                   Añadí <code>texto</code> para recibir la clave como mensaje.
+                   Ej: <code>/tmpkey 12 texto</code>
+/revokekey   — Revoca todas las claves temporales activas
+/ayuda       — Esta ayuda
+━━━━━━━━━━━━━━━━━━━━━
+⚠️ La clave privada transita por los servidores de Telegram. Válida solo por el tiempo indicado."
 }
 
 cmd_backups() {
@@ -202,6 +230,111 @@ $(echo "${banned_list}" | while read -r ip; do echo "🚫 <code>${ip}</code>"; d
   else
     send_msg "⚠️ Fail2ban no disponible"
   fi
+}
+
+cmd_tmpkey() {
+  # --- Arg parsing (tasks 2.2 + 2.3) ---
+  local args_str="${text:7}"  # strip "/tmpkey"
+  read -ra args <<< "${args_str}"
+  local hours="${TMPKEY_VALIDITY_HOURS:-24}"
+  local inline=0
+  for token in "${args[@]}"; do
+    if [[ "${token}" =~ ^[0-9]+$ ]]; then
+      # clamp to 1–168
+      if (( token >= 1 && token <= 168 )); then
+        hours="${token}"
+      else
+        send_msg "⚠️ Horas inválidas. Usá un valor entre 1 y 168."
+        return 1
+      fi
+    elif [[ "${token}" == "texto" ]]; then
+      inline=1
+    fi
+  done
+
+  local epoch
+  epoch=$(date +%s)
+  local expiry
+  expiry=$(date -u -d "+${hours} hours" "+%Y%m%d%H%M%S")
+
+  # Resolve authorized_keys path from SSH_USER
+  local auth_keys
+  auth_keys="$(getent passwd "${SSH_USER}" | cut -d: -f6)/.ssh/authorized_keys"
+
+  # Temp dir — trap guarantees shred even on early return
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap 'shred -u "${tmpdir}"/* 2>/dev/null; rm -rf "${tmpdir}"' RETURN
+
+  # Generate keypair
+  ssh-keygen -t ed25519 -f "${tmpdir}/tmpkey" -N "" -C "tmpkey-${epoch}" -q
+
+  # Append marker + pubkey pair to authorized_keys (BEFORE upload attempt)
+  echo "# tmpkey-${epoch}" >> "${auth_keys}"
+  echo "expiry-time=\"${expiry}\" $(cat "${tmpdir}/tmpkey.pub")" >> "${auth_keys}"
+
+  if (( inline )); then
+    # HTML-escape the private key
+    local privkey
+    privkey=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' "${tmpdir}/tmpkey")
+    local msg
+    msg="🔑 <b>Clave SSH temporal</b> (válida ${hours}h)
+Expira: <code>${expiry}</code>
+⚠️ La clave privada transita por los servidores de Telegram.
+
+<pre>${privkey}</pre>"
+    local send_result
+    send_result=$(send_msg "${msg}")
+    if ! echo "${send_result}" | grep -q '"ok":true'; then
+      sed -i "/tmpkey-${epoch}/d" "${auth_keys}"
+      send_msg "🔴 <b>Error al enviar la clave.</b> La entrada fue eliminada de authorized_keys. Intentá nuevamente."
+      return 1
+    fi
+  else
+    local response
+    response=$(send_document "${tmpdir}/tmpkey")
+    if echo "${response}" | grep -q '"ok":true'; then
+      send_msg "🔑 <b>Clave SSH temporal enviada como archivo</b>
+Válida por <b>${hours}h</b> — Expira: <code>${expiry}</code>
+⚠️ La clave privada transita por los servidores de Telegram."
+    else
+      # Rollback: remove both marker and pubkey lines
+      sed -i "/tmpkey-${epoch}/d" "${auth_keys}"
+      send_msg "🔴 <b>Error al enviar la clave.</b> La entrada fue eliminada de authorized_keys. Intentá nuevamente."
+      return 1
+    fi
+  fi
+}
+
+cmd_revokekey() {
+  local auth_keys
+  auth_keys="$(getent passwd "${SSH_USER}" | cut -d: -f6)/.ssh/authorized_keys"
+
+  local markers
+  markers=$(grep "# tmpkey-" "${auth_keys}" 2>/dev/null || true)
+
+  if [[ -z "${markers}" ]]; then
+    send_msg "✅ No hay claves temporales activas."
+    return 0
+  fi
+
+  # Build list for the user
+  local list_msg="🗝 <b>Claves temporales activas:</b>"
+  while IFS= read -r line; do
+    local ep
+    ep=$(echo "${line}" | grep -o 'tmpkey-[0-9]*' | cut -d- -f2)
+    if [[ -n "${ep}" ]]; then
+      list_msg="${list_msg}
+• epoch <code>${ep}</code> — $(date -d "@${ep}" '+%d/%m/%Y %H:%M' 2>/dev/null || echo "${ep}")"
+    fi
+  done <<< "${markers}"
+
+  # Revoke all immediately
+  sed -i "/tmpkey-/d" "${auth_keys}"
+
+  send_msg "${list_msg}
+
+🗑 Todas las claves temporales han sido <b>revocadas</b>."
 }
 
 cmd_instalar_updates() {
@@ -273,6 +406,8 @@ for r in data.get('result', []):
       /ayuda*)      cmd_ayuda ;;
       /backups*)    cmd_backups ;;
       /baneados*)   cmd_baneados ;;
+      /tmpkey*)     cmd_tmpkey ;;
+      /revokekey*)  cmd_revokekey ;;
       /si*)
         PENDING=$(cat "${STATE_FILE}" 2>/dev/null)
         if [[ -z "${PENDING}" ]]; then
@@ -356,6 +491,83 @@ CHECK_SCRIPT
 chmod +x /usr/local/bin/vps-check-updates
 
 # -----------------------------------------------------------------------------
+# PASO 4b — Script de limpieza de claves SSH temporales expiradas
+# -----------------------------------------------------------------------------
+log_info "Creando script de limpieza de claves temporales..."
+cat > /usr/local/bin/vps-tmpkey-prune <<'PRUNE_SCRIPT'
+#!/usr/bin/env python3
+"""Remove expired tmpkey pairs from authorized_keys.
+Each pair is a comment line '# tmpkey-<epoch>' followed by the pubkey line
+containing 'expiry-time="YYYYMMDDHHMMSS"'. Pairs are removed when the
+expiry-time is in the past (UTC). Unexpired pairs and all other lines are kept.
+"""
+import sys
+import re
+import os
+from datetime import datetime, timezone
+
+CONF = "/etc/vps-hardening/config.env"
+
+def read_var(name, default=""):
+    try:
+        with open(CONF) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(f"{name}="):
+                    return line.split("=", 1)[1].strip().strip('"\'')
+    except OSError:
+        pass
+    return default
+
+ssh_user = read_var("SSH_USER", "admin")
+
+import subprocess
+result = subprocess.run(
+    ["getent", "passwd", ssh_user],
+    capture_output=True, text=True
+)
+if result.returncode != 0:
+    print(f"[tmpkey-prune] user {ssh_user!r} not found", file=sys.stderr)
+    sys.exit(1)
+
+home = result.stdout.split(":")[5]
+ak = os.path.join(home, ".ssh", "authorized_keys")
+
+if not os.path.isfile(ak):
+    sys.exit(0)
+
+now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+with open(ak) as f:
+    lines = f.readlines()
+
+out = []
+i = 0
+removed = 0
+while i < len(lines):
+    line = lines[i]
+    if re.match(r'# tmpkey-\d+', line) and i + 1 < len(lines):
+        key_line = lines[i + 1]
+        m = re.search(r'expiry-time="(\d{14})"', key_line)
+        if m and m.group(1) < now:
+            i += 2
+            removed += 1
+            continue
+    out.append(line)
+    i += 1
+
+if removed:
+    with open(ak, "w") as f:
+        f.writelines(out)
+    print(f"[tmpkey-prune] removed {removed} expired tmpkey pair(s) from {ak}")
+else:
+    print(f"[tmpkey-prune] no expired tmpkeys found in {ak}")
+PRUNE_SCRIPT
+
+chmod +x /usr/local/bin/vps-tmpkey-prune
+log_ok "Script de limpieza de claves temporales creado"
+
+# -----------------------------------------------------------------------------
 # PASO 5 — Servicio systemd para el bot (sin directivas de namespace problemáticas)
 # -----------------------------------------------------------------------------
 log_info "Creando servicio systemd para el bot..."
@@ -406,8 +618,11 @@ cat >> /etc/cron.d/vps-backup <<EOF
 
 # Verificación diaria de actualizaciones (9:00 AM)
 0 9 * * * root /usr/local/bin/vps-check-updates >> /var/log/vps-updates.log 2>&1
+
+# Limpieza semanal de claves SSH temporales expiradas (domingos 4:00 AM)
+0 4 * * 0 root /usr/local/bin/vps-tmpkey-prune >> /var/log/vps-bot.log 2>&1
 EOF
-log_ok "Cron configurado: 9:00 AM diario"
+log_ok "Cron configurado: 9:00 AM diario + limpieza semanal de tmpkeys"
 
 # -----------------------------------------------------------------------------
 # PASO 8 — Activar notificaciones de Fail2ban

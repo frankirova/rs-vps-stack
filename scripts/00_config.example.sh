@@ -46,6 +46,7 @@ WG_PEER_NAMES=(
 TG_BOT_TOKEN="123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # <-- EDITAR
 TG_CHAT_ID="000000000"                                      # <-- EDITAR
 TG_ADMIN_IDS=("000000000")                                  # <-- EDITAR
+TMPKEY_VALIDITY_HOURS=24                                    # Validez de claves SSH temporales en horas (máx. 168)
 
 # -----------------------------------------------------------------------------
 # BACKUPS — Restic

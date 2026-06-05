@@ -1,0 +1,19 @@
+# Nunca subir credenciales reales
+*.env
+config.env
+restic_password
+*.key
+*.pem
+
+# Configs con datos reales
+00_config.sh
+
+# Archivos temporales
+*.tmp
+*.log
+*.bak
+*.backup_*
+
+# WireGuard — nunca subir peers con claves reales
+peers/
+./atl

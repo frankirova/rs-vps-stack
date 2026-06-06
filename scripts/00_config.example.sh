@@ -63,11 +63,20 @@ BACKUP_PATHS=(
   "/root"
   "/usr/local/bin"
   "/etc/vps-hardening"
+  "/opt/vaultwarden/data"  # debe coincidir con VW_DATA_DIR
 )
 
 BACKUP_RETENTION_DAILY=7
 BACKUP_RETENTION_WEEKLY=4
 BACKUP_RETENTION_MONTHLY=3
+
+# -----------------------------------------------------------------------------
+# VAULTWARDEN — Gestor de contraseñas (acceso solo por VPN)
+# -----------------------------------------------------------------------------
+VW_PORT=8222                              # Puerto loopback del contenedor (no editar salvo conflicto)
+VW_DATA_DIR="/opt/vaultwarden/data"       # Directorio de datos persistentes del contenedor
+VW_DOMAIN="10.10.0.1"                    # IP/hostname de la VPN — usado como SAN del cert y env DOMAIN
+VW_ADMIN_TOKEN=""                         # Dejar vacío — módulo 09 genera y hashea el token automáticamente
 
 # -----------------------------------------------------------------------------
 # FAIL2BAN

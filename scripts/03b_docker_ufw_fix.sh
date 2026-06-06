@@ -12,8 +12,10 @@
 #   1. Le dice a Docker que NO toque iptables (daemon.json)
 #   2. Crea una red Docker interna dedicada para comunicación entre contenedores
 #   3. Agrega reglas iptables manuales que permiten solo tráfico VPN → Docker
-#   4. Reinicia Docker de forma controlada
-#   5. Verifica que los contenedores siguen funcionando internamente
+#   4. Agrega reglas UFW nativas para wg0 (ufw route allow) — sin esto UFW
+#      descarta el forwarding antes de que llegue a las reglas manuales
+#   5. Reinicia Docker de forma controlada
+#   6. Verifica que los contenedores siguen funcionando internamente
 #
 # EFECTO INMEDIATO AL EJECUTAR:
 #   - Todos los puertos Docker dejan de ser accesibles desde internet
@@ -221,6 +223,16 @@ log_ok "Reglas iptables manuales aplicadas"
 log_info "Persistiendo reglas iptables..."
 
 apt-get install -y -qq iptables-persistent netfilter-persistent
+
+# Permitir tráfico VPN a través de UFW antes de que sus cadenas descarten el forwarding.
+# ufw route allow cubre el tráfico que el host rutea (forwarding); ufw allow cubre
+# el tráfico destinado al propio host. Ambos son necesarios para que wg0 funcione.
+ufw allow in on "${WG_INTERFACE}"
+ufw allow out on "${WG_INTERFACE}"
+ufw route allow in on "${WG_INTERFACE}"
+ufw route allow out on "${WG_INTERFACE}"
+
+log_ok "Reglas UFW para ${WG_INTERFACE} aplicadas"
 
 # Guardar reglas actuales
 netfilter-persistent save

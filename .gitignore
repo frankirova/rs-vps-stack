@@ -16,5 +16,5 @@ restic_password
 
 # WireGuard — nunca subir peers con claves reales
 peers/
-/atl
+/.atl
 docs/roadmap.md

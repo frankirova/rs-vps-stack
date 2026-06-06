@@ -153,6 +153,7 @@ notify_telegram() {
 log "=== Iniciando backup ==="
 
 # Directorios a respaldar (definidos en config)
+# NOTA: "/opt/vaultwarden/data" debe coincidir con VW_DATA_DIR en 00_config.sh
 BACKUP_PATHS=(
   "/etc"
   "/home"
@@ -161,6 +162,13 @@ BACKUP_PATHS=(
   "/usr/local/bin"
   "/etc/vps-hardening"
 )
+
+# Vaultwarden — solo si está instalado
+if [[ -d "/opt/vaultwarden/data" ]]; then
+  BACKUP_PATHS+=("/opt/vaultwarden/data")
+else
+  log "WARN: /opt/vaultwarden/data no existe — omitido del backup"
+fi
 
 # Ejecutar backup
 START_TIME=$(date +%s)

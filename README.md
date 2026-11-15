@@ -486,3 +486,8 @@ El servicio `vps-telegram-bot` instalado por el módulo 08 **no usa las directiv
 ## Licencia
 
 MIT — Libre para usar, modificar y distribuir.
+
+
+## Cómo se construyó
+
+Desarrollado con agentes de IA bajo mi dirección. Definí el problema, los requisitos, la arquitectura y los criterios de aceptación; revisé el código, lo probé y lo uso.
